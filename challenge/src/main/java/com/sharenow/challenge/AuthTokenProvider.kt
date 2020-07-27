@@ -33,7 +33,7 @@ class AuthTokenProvider(
     private val currentTime: () -> ZonedDateTime
 ) {
 
-    private var refreshCache: BehaviorSubject<Boolean> = BehaviorSubject.createDefault(false)
+    private var refreshCache: BehaviorSubject<Unit> = BehaviorSubject.createDefault(Unit)
     private var refreshCacheDisposable = Disposables.disposed()
     private var cachedToken: AuthToken? = null
     private val tokenObservable: Observable<AuthToken> =
@@ -43,48 +43,44 @@ class AuthTokenProvider(
      * @return the observable auth token as a string
      */
     fun observeToken(): Observable<String> {
-        return tokenObservable
-            .map {
-                it.token
-            }
+        return tokenObservable.map { it.token }
     }
 
     private fun fetchToken(): Observable<AuthToken> {
-        val requestTokenForLoggedUser: Maybe<AuthToken> =
-            refreshAuthToken
-                .retry(2)
-                .filter {
-                    it.isValid(currentTime)
-                }
-                .switchIfEmpty(Single.defer {
-                    refreshAuthToken.retry(2)
-                })
-                .filter {
-                    it.isValid(currentTime)
-                }
-                .doOnSuccess {
-                    setUpCache(it)
-                    cachedToken = it
-                }
-
-        return refreshCache
-            .hide()
+        return refreshCache.hide()
             .flatMap {
-                if (cachedToken != null && cachedToken?.isValid(currentTime) == true) {
+                if (cachedToken?.isValid(currentTime) == true) {
                     Observable.just(cachedToken)
                 } else {
-                    isLoggedInObservable
-                        .filter { it }
-                        .switchIfEmpty(Observable.defer {
-                            cachedToken = null
-                            Observable.empty<Boolean>()
-                        })
-                        .flatMapMaybe { requestTokenForLoggedUser }
+                    fetchFromNetwork()
                 }
+            }
+    }
+
+    private fun fetchFromNetwork(): Observable<AuthToken> {
+        val refresh = refreshAuthToken
+            .retry(1)
+            .filter { it.isValid(currentTime) }
+
+        return isLoggedInObservable
+            .filter { it }
+            .switchIfEmpty(Observable.defer {
+                refreshCacheDisposable.dispose()
+                cachedToken = null
+                Observable.empty<Boolean>()
+            })
+            .flatMapMaybe {
+                refresh
+                    .switchIfEmpty(
+                        refresh
+                    ).doOnSuccess {
+                        setUpCache(it)
+                    }
             }
     }
 
     private fun setUpCache(token: AuthToken) {
+        cachedToken = token
         if (refreshCacheDisposable.isDisposed) {
             refreshCacheDisposable =
                 Completable.timer(
@@ -93,7 +89,7 @@ class AuthTokenProvider(
                     computationScheduler
                 ).subscribe {
                     cachedToken = null
-                    refreshCache.onNext(true)
+                    refreshCache.onNext(Unit)
                 }
         }
     }
